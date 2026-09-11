@@ -44,10 +44,10 @@ from evaluation.metrics import evaluate_transfer_pair
 
 
 @st.cache_resource(show_spinner=False)
-def load_cached_model(cache_key: str = "v6_canonical_weights_verified"):
-    """Ensures checkpoints exist, forces fresh weights, and performs self-test verification."""
+def load_cached_model():
+    """Ensures checkpoints exist, loads model weights, and caches model in memory."""
     ensure_weights_exist()
-    model = get_model(force_reload=True)
+    model = get_model(force_reload=False)
     with torch.no_grad():
         test_in = torch.full((1, 3, 64, 64), 0.5)
         test_out = model(test_in, test_in, 0.5)
@@ -59,9 +59,6 @@ def load_cached_model(cache_key: str = "v6_canonical_weights_verified"):
 
 
 def main():
-    # Load model with friendly spinner
-    with st.spinner("🧠 Initializing neural style transfer model (one-time setup)..."):
-        model = load_cached_model("v6_canonical_weights_verified")
 
     st.title("🎨 Artistic Image Style Transfer")
     st.caption("Fast neural style transfer with controllable strength and strict content preservation.")
@@ -216,7 +213,8 @@ def main():
                 st.error("Please select or upload a Style Image.")
             else:
                 t_start = time.time()
-                with st.spinner(f"Stylizing image at {res_choice}×{res_choice}..."):
+                with st.spinner(f"Loading model & stylizing image at {res_choice}×{res_choice}..."):
+                    model = load_cached_model()
                     to_tensor = transforms.ToTensor()
                     device = torch.device("cpu")
 
@@ -287,6 +285,7 @@ def main():
             with st.expander("📊 Quality & Evaluation Metrics (Optional)"):
                 if st.button("Compute Metrics for Current Result"):
                     with st.spinner("Calculating SSIM, PSNR, and feature distances..."):
+                        model = load_cached_model()
                         metrics = evaluate_transfer_pair(
                             st.session_state.last_result,
                             st.session_state.last_content,
@@ -304,16 +303,50 @@ def main():
         st.subheader("🕵️ Decode Hidden Message from Artwork")
         st.caption("Upload any artistic image created with this app to extract and reveal its embedded secret message.")
 
-        decode_file = st.file_uploader("Upload Stego Artwork (PNG)", type=["png", "jpg", "jpeg"], key="decoder_upload")
+        # Option: Use demo artwork or upload file
+        sample_stego_path = os.path.join(SAMPLES_DIR, "stego_sample.png")
+        has_sample = os.path.exists(sample_stego_path)
 
-        if decode_file is not None:
+        source_options = ["Upload Image"]
+        if has_sample:
+            source_options.append("🧪 Try Demo Stego Artwork (Embedded: 'i want to meet u')")
+
+        decode_source = st.radio("Artwork Source", source_options, horizontal=True)
+
+        uploaded_pil = None
+        if decode_source == "Upload Image":
+            decode_file = st.file_uploader(
+                "Upload Stego Artwork (PNG)",
+                type=["png", "bmp"],
+                help="Note: Secret messages are stored in pixel bit values and require lossless PNG format. JPEG compression removes hidden data.",
+                key="decoder_upload"
+            )
+            if decode_file is not None:
+                try:
+                    uploaded_pil = Image.open(decode_file).convert("RGB")
+                except Exception as e:
+                    st.error(f"Failed to open uploaded file: {e}")
+                    uploaded_pil = None
+        else:
+            if has_sample:
+                uploaded_pil = Image.open(sample_stego_path).convert("RGB")
+                st.info("Loaded demo artwork containing embedded secret message: *'i want to meet u'*. Click below to extract!")
+
+        if uploaded_pil is not None:
             col_dec_img, col_dec_res = st.columns([1, 2])
-            uploaded_pil = Image.open(decode_file).convert("RGB")
 
             with col_dec_img:
-                st.image(uploaded_pil, caption="Uploaded Artwork", use_container_width=True)
+                st.image(uploaded_pil, caption="Artwork for Decoding", use_container_width=True)
 
             with col_dec_res:
+                from steganography import is_stego_image, extract_message
+
+                # Instant signature detector
+                if is_stego_image(uploaded_pil):
+                    st.success("🔒 **Steganographic Signature Detected!** This artwork contains a hidden message.")
+                else:
+                    st.warning("⚠️ **No Stego Signature Found.** This image does not contain an embedded message, or was converted to JPEG.")
+
                 decode_pwd = st.text_input(
                     "Passcode / Decryption Key (if message was password protected)",
                     type="password",
@@ -322,7 +355,6 @@ def main():
                 )
 
                 if st.button("🔍 Extract Secret Message", type="primary", use_container_width=True):
-                    from steganography import extract_message
                     with st.spinner("Analyzing pixel bits and reading steganographic payload..."):
                         pwd = decode_pwd.strip() if decode_pwd.strip() else None
                         success, secret_text, err_msg = extract_message(uploaded_pil, password=pwd)
